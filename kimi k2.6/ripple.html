@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Water Ripple Simulation</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+    canvas {
+      display: block;
+    }
+    .info {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      color: #fff;
+      font-family: sans-serif;
+      font-size: 12px;
+      opacity: 0.7;
+      pointer-events: none;
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div class="info">Click or touch to create ripples</div>
+  <script>
+    (function() {
+      'use strict';
+
+      // Configuration
+      const CONFIG = {
+        gridSize: 500,
+        damping: 0.985,
+        rippleStrength: 300,
+        lightIntensity: 1.2,
+        backgroundColor: { r: 0, g: 40, b: 80 }
+      };
+
+      // Simulation state
+      const sim = {
+        width: 0,
+        height: 0,
+        curr: null,
+        prev: null,
+        temp: null,
+        damping: CONFIG.damping
+      };
+
+      // Rendering state
+      const render = {
+        canvas: document.getElementById('canvas'),
+        ctx: null,
+        imageData: null,
+        pixelBuffer: null,
+        width: 0,
+        height: 0
+      };
+
+      // Input state
+      const input = {
+        pending: [],
+        isDown: false
+      };
+
+      // Pre-allocated arrays to avoid GC during the animation loop
+      function allocateGrid(w, h) {
+        const size = w * h;
+        return {
+          w: w,
+          h: h,
+          buf: new Float32Array(size)
+        };
+      }
+
+      function initSimulation(w, h) {
+        sim.width = w;
+        sim.height = h;
+        sim.curr = allocateGrid(w, h);
+        sim.prev = allocateGrid(w, h);
+        sim.temp = null;
+      }
+
+      function initRendering() {
+        render.ctx = render.canvas.getContext('2d', { alpha: false });
+        resizeCanvas();
+      }
+
+      function resizeCanvas() {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        render.canvas.width = w;
+        render.canvas.height = h;
+        render.width = w;
+        render.height = h;
+        render.imageData = render.ctx.createImageData(w, h);
+        render.pixelBuffer = new Uint32Array(render.imageData.data.buffer);
+      }
+
+      // Map screen coordinates to grid coordinates
+      function screenToGrid(sx, sy) {
+        const scaleX = sim.width / render.width;
+        const scaleY = sim.height / render.height;
+        return {
+          x: Math.floor(sx * scaleX),
+          y: Math.floor(sy * scaleY)
+        };
+      }
+
+      function injectRipple(gx, gy, strength) {
+        if (gx < 1 || gx >= sim.width - 1 || gy < 1 || gy >= sim.height - 1) return;
+        sim.curr.buf[gy * sim.width + gx] += strength;
+      }
+
+      function processInputQueue() {
+        for (let i = 0; i < input.pending.length; i++) {
+          const p = input.pending[i];
+          injectRipple(p.x, p.y, CONFIG.rippleStrength);
+        }
+        input.pending.length = 0;
+      }
+
+      // Wave propagation using finite difference approximation
+      function updateSimulation() {
+        const w = sim.width;
+        const h = sim.height;
+        const curr = sim.curr.buf;
+        const prev = sim.prev.buf;
+        const damping = sim.damping;
+
+        // Swap buffers
+        sim.temp = sim.curr;
+        sim.curr = sim.prev;
+        sim.prev = sim.temp;
+        const next = sim.curr.buf;
+        const old = sim.prev.buf;
+
+        for (let y = 1; y < h - 1; y++) {
+          const row = y * w;
+          for (let x = 1; x < w - 1; x++) {
+            const idx = row + x;
+            // Average of four neighbors minus current value
+            const val = (
+              old[idx - 1] +
+              old[idx + 1] +
+              old[idx - w] +
+              old[idx + w]
+            ) * 0.5 - next[idx];
+            next[idx] = val * damping;
+          }
+        }
+      }
+
+      // Render height map to pixel buffer with simple lighting
+      function draw() {
+        const w = sim.width;
+        const h = sim.height;
+        const grid = sim.curr.buf;
+        const pw = render.width;
+        const ph = render.height;
+        const pixels = render.pixelBuffer;
+
+        const scaleX = w / pw;
+        const scaleY = h / ph;
+        const bgR = CONFIG.backgroundColor.r;
+        const bgG = CONFIG.backgroundColor.g;
+        const bgB = CONFIG.backgroundColor.b;
+
+        for (let py = 0; py < ph; py++) {
+          const gy = Math.min(h - 2, Math.floor(py * scaleY));
+          const rowOffset = gy * w;
+          const pixelRow = py * pw;
+
+          for (let px = 0; px < pw; px++) {
+            const gx = Math.min(w - 2, Math.floor(px * scaleX));
+            const idx = rowOffset + gx;
+
+            // Simple shading based on height gradient
+            const dx = grid[idx + 1] - grid[idx - 1];
+            const dy = grid[idx + w] - grid[idx - w];
+
+            const shade = Math.min(255, Math.max(0, 128 + (dx + dy) * CONFIG.lightIntensity));
+
+            const r = Math.min(255, Math.max(0, bgR + shade - 128));
+            const g = Math.min(255, Math.max(0, bgG + shade - 128));
+            const b = Math.min(255, Math.max(0, bgB + shade - 128));
+
+            // ABGR for little-endian
+            pixels[pixelRow + px] = (255 << 24) | (b << 16) | (g << 8) | r;
+          }
+        }
+
+        render.ctx.putImageData(render.imageData, 0, 0);
+      }
+
+      function onPointerDown(e) {
+        input.isDown = true;
+        const gxgy = screenToGrid(e.clientX, e.clientY);
+        input.pending.push(gxgy);
+      }
+
+      function onPointerMove(e) {
+        if (input.isDown) {
+          const gxgy = screenToGrid(e.clientX, e.clientY);
+          input.pending.push(gxgy);
+        }
+      }
+
+      function onPointerUp() {
+        input.isDown = false;
+      }
+
+      function onTouchStart(e) {
+        e.preventDefault();
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches[i];
+          const gxgy = screenToGrid(t.clientX, t.clientY);
+          input.pending.push(gxgy);
+        }
+      }
+
+      function onTouchMove(e) {
+        e.preventDefault();
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches[i];
+          const gxgy = screenToGrid(t.clientX, t.clientY);
+          input.pending.push(gxgy);
+        }
+      }
+
+      function onResize() {
+        resizeCanvas();
+      }
+
+      function loop() {
+        processInputQueue();
+        updateSimulation();
+        draw();
+        requestAnimationFrame(loop);
+      }
+
+      function init() {
+        initSimulation(CONFIG.gridSize, CONFIG.gridSize);
+        initRendering();
+
+        window.addEventListener('resize', onResize);
+        window.addEventListener('mousedown', onPointerDown);
+        window.addEventListener('mousemove', onPointerMove);
+        window.addEventListener('mouseup', onPointerUp);
+        window.addEventListener('touchstart', onTouchStart, { passive: false });
+        window.addEventListener('touchmove', onTouchMove, { passive: false });
+        window.addEventListener('touchend', onPointerUp);
+
+        requestAnimationFrame(loop);
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>

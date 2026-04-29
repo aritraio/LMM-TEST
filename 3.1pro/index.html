@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Interactive Water Ripple Simulation</title>
+    <meta name="description" content="A high-performance 2D water ripple simulation using the HTML5 Canvas API and finite difference wave equation.">
+    <style>
+        :root {
+            --bg-color: #000;
+        }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: var(--bg-color);
+            overflow: hidden;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            touch-action: none; /* Prevent scrolling/zooming on touch devices */
+        }
+
+        #waterCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            /* Object-fit and image-rendering ensure it scales up without harsh pixels, although water looks better slightly smooth */
+            object-fit: cover;
+            cursor: crosshair;
+        }
+
+        .overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.8);
+            pointer-events: none;
+            user-select: none;
+            z-index: 10;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+        }
+
+        h1 {
+            margin: 0 0 5px 0;
+            font-size: 1.5rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        p {
+            margin: 0;
+            font-size: 0.9rem;
+            font-weight: 400;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <div class="overlay">
+        <h1>Water Simulation</h1>
+        <p>Click or drag to interact</p>
+    </div>
+    <canvas id="waterCanvas"></canvas>
+
+    <script>
+        /**
+         * 2D Water Ripple Simulation
+         * Architecture:
+         * - Physics: Finite difference wave equation.
+         * - Rendering: Direct ImageData manipulation, simple refraction and shading.
+         * - Architecture: Decoupled simulation size from window size for consistent ~60fps.
+         */
+
+        const canvas = document.getElementById('waterCanvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true, alpha: false });
+
+        // Configuration
+        const MAX_SIM_DIMENSION = 500; // Cap grid size to maintain performance (~250k pixels max)
+        const DAMPING = 0.985; // Energy loss over time (0.0 to 1.0)
+        const REFRACTION_STRENGTH = 0.5; // How much the background gets distorted
+        const SHADING_STRENGTH = 1.2; // Specular highlight strength
+        const DROP_RADIUS = 3; // Radius of interaction drops
+        const DROP_STRENGTH = 500; // Initial energy injected
+
+        let SIM_WIDTH = 0;
+        let SIM_HEIGHT = 0;
+
+        // Double buffering for wave simulation
+        let buffer1;
+        let buffer2;
+        
+        // Background texture representation for refraction
+        let backgroundArray;
+
+        // Rendering data
+        let imgData;
+        let pixelData;
+
+        // Input state
+        let isPointerDown = false;
+        let pointerPos = { x: 0, y: 0 };
+        let lastPointerPos = { x: 0, y: 0 };
+
+        function init() {
+            handleResize();
+            window.addEventListener('resize', handleResize);
+            
+            // Pointer events for unified mouse/touch handling
+            canvas.addEventListener('pointerdown', onPointerDown);
+            window.addEventListener('pointerup', onPointerUp);
+            window.addEventListener('pointermove', onPointerMove);
+
+            // Start animation loop
+            requestAnimationFrame(animate);
+        }
+
+        function handleResize() {
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+
+            // Calculate simulation grid size
+            const ratio = MAX_SIM_DIMENSION / Math.max(w, h);
+            const scale = Math.min(1.0, ratio);
+
+            SIM_WIDTH = Math.floor(w * scale);
+            SIM_HEIGHT = Math.floor(h * scale);
+
+            canvas.width = SIM_WIDTH;
+            canvas.height = SIM_HEIGHT;
+
+            const numPixels = SIM_WIDTH * SIM_HEIGHT;
+            buffer1 = new Float32Array(numPixels);
+            buffer2 = new Float32Array(numPixels);
+            
+            imgData = ctx.createImageData(SIM_WIDTH, SIM_HEIGHT);
+            pixelData = imgData.data;
+
+            generateBackground();
+            
+            // Initial drop to show it's working
+            addDrop(Math.floor(SIM_WIDTH/2), Math.floor(SIM_HEIGHT/2), DROP_RADIUS * 2, DROP_STRENGTH * 2);
+        }
+
+        function generateBackground() {
+            backgroundArray = new Uint8Array(SIM_WIDTH * SIM_HEIGHT * 3);
+            
+            for (let y = 0; y < SIM_HEIGHT; y++) {
+                for (let x = 0; x < SIM_WIDTH; x++) {
+                    const idx = (x + y * SIM_WIDTH) * 3;
+                    
+                    // Create a beautiful vibrant gradient
+                    // Top: Cyan/Teal, Bottom: Deep Blue
+                    const tY = y / SIM_HEIGHT;
+                    const tX = x / SIM_WIDTH;
+                    
+                    // Base color gradient
+                    const r = 0;
+                    const g = Math.floor(180 - 100 * tY + 20 * Math.sin(tX * 5));
+                    const b = Math.floor(220 - 50 * tY);
+                    
+                    backgroundArray[idx] = r;
+                    backgroundArray[idx + 1] = g;
+                    backgroundArray[idx + 2] = b;
+                }
+            }
+        }
+
+        function getSimCoord(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            // Map window coordinates to simulation grid coordinates
+            const scaleX = SIM_WIDTH / rect.width;
+            const scaleY = SIM_HEIGHT / rect.height;
+            
+            return {
+                x: Math.floor((clientX - rect.left) * scaleX),
+                y: Math.floor((clientY - rect.top) * scaleY)
+            };
+        }
+
+        function onPointerDown(e) {
+            isPointerDown = true;
+            const pos = getSimCoord(e.clientX, e.clientY);
+            pointerPos = pos;
+            lastPointerPos = pos;
+            addDrop(pos.x, pos.y, DROP_RADIUS, DROP_STRENGTH);
+        }
+
+        function onPointerUp(e) {
+            isPointerDown = false;
+        }
+
+        function onPointerMove(e) {
+            if (!isPointerDown) return;
+            
+            lastPointerPos = pointerPos;
+            pointerPos = getSimCoord(e.clientX, e.clientY);
+            
+            // Interpolate points if moving fast
+            const dx = pointerPos.x - lastPointerPos.x;
+            const dy = pointerPos.y - lastPointerPos.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            const steps = Math.max(1, Math.floor(dist / DROP_RADIUS));
+            for(let i=0; i<=steps; i++) {
+                const t = steps === 0 ? 0 : i / steps;
+                const ix = Math.floor(lastPointerPos.x + dx * t);
+                const iy = Math.floor(lastPointerPos.y + dy * t);
+                addDrop(ix, iy, DROP_RADIUS, DROP_STRENGTH);
+            }
+        }
+
+        function addDrop(x, y, radius, strength) {
+            // Inject energy into the previous buffer (buffer1)
+            for (let j = -radius; j <= radius; j++) {
+                for (let i = -radius; i <= radius; i++) {
+                    const cx = x + i;
+                    const cy = y + j;
+                    
+                    if (cx >= 1 && cx < SIM_WIDTH - 1 && cy >= 1 && cy < SIM_HEIGHT - 1) {
+                        // Circular drop shape
+                        if (i * i + j * j <= radius * radius) {
+                            buffer1[cx + cy * SIM_WIDTH] += strength;
+                        }
+                    }
+                }
+            }
+        }
+
+        function updatePhysics() {
+            // Compute the wave equation
+            for (let y = 1; y < SIM_HEIGHT - 1; y++) {
+                for (let x = 1; x < SIM_WIDTH - 1; x++) {
+                    const idx = x + y * SIM_WIDTH;
+                    
+                    // The core wave equation logic
+                    // Next state = (average of neighbors) * 2 - previous state
+                    // We use (neighbors / 2) - previous, which is equivalent when swapping buffers correctly
+                    let nextValue = (
+                        buffer1[idx - 1] + 
+                        buffer1[idx + 1] + 
+                        buffer1[idx - SIM_WIDTH] + 
+                        buffer1[idx + SIM_WIDTH]
+                    ) / 2.0 - buffer2[idx];
+                    
+                    // Apply damping
+                    nextValue *= DAMPING;
+                    
+                    buffer2[idx] = nextValue;
+                }
+            }
+            
+            // Swap buffers
+            const temp = buffer1;
+            buffer1 = buffer2;
+            buffer2 = temp;
+            // Now buffer1 contains the latest state, buffer2 is the old state ready to be overwritten
+        }
+
+        function render() {
+            // Render from buffer1 (current state)
+            for (let y = 1; y < SIM_HEIGHT - 1; y++) {
+                for (let x = 1; x < SIM_WIDTH - 1; x++) {
+                    const idx = x + y * SIM_WIDTH;
+                    
+                    // Calculate differences (slopes)
+                    // We use buffer1 for rendering
+                    const dx = buffer1[idx - 1] - buffer1[idx + 1];
+                    const dy = buffer1[idx - SIM_WIDTH] - buffer1[idx + SIM_WIDTH];
+                    
+                    // Refraction (texture coordinate offset)
+                    let rx = x + Math.floor(dx * REFRACTION_STRENGTH);
+                    let ry = y + Math.floor(dy * REFRACTION_STRENGTH);
+                    
+                    // Clamp to edges
+                    rx = Math.max(0, Math.min(SIM_WIDTH - 1, rx));
+                    ry = Math.max(0, Math.min(SIM_HEIGHT - 1, ry));
+                    
+                    const bgIdx = (rx + ry * SIM_WIDTH) * 3;
+                    
+                    // Shading (specular highlights based on slope)
+                    // Assuming light is coming from top-left
+                    const shading = (dx + dy) * SHADING_STRENGTH;
+                    
+                    // Output pixel index
+                    const outIdx = idx * 4;
+                    
+                    // Apply background color with shading
+                    pixelData[outIdx]     = Math.min(255, Math.max(0, backgroundArray[bgIdx] + shading));
+                    pixelData[outIdx + 1] = Math.min(255, Math.max(0, backgroundArray[bgIdx + 1] + shading));
+                    pixelData[outIdx + 2] = Math.min(255, Math.max(0, backgroundArray[bgIdx + 2] + shading));
+                    pixelData[outIdx + 3] = 255; // Alpha
+                }
+            }
+            
+            // Draw edges (simplest is to just leave them black or copy nearest pixel, 
+            // but for performance, we just skip drawing them and let them be transparent/black 
+            // or whatever was there. To be clean, we let them be.)
+            
+            // Push to canvas
+            ctx.putImageData(imgData, 0, 0);
+        }
+
+        function animate() {
+            updatePhysics();
+            render();
+            requestAnimationFrame(animate);
+        }
+
+        // Boot
+        init();
+    </script>
+</body>
+</html>
