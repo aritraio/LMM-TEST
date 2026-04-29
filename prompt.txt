@@ -1,0 +1,41 @@
+Build an interactive water ripple simulation using HTML, CSS, and JavaScript with the Canvas API.
+
+Requirements:
+
+1. Physics Model
+- Implement a 2D wave simulation using a discrete height map grid.
+- Use a finite difference approximation of the wave equation.
+- Support:
+  - Wave propagation across the grid
+  - Damping (energy loss over time)
+  - Interference (multiple waves interacting correctly)
+
+2. Interaction
+- On mouse click or touch, inject energy at the interaction point.
+- Support rapid repeated inputs without breaking the simulation.
+
+3. Rendering
+- Use Canvas 2D (no WebGL).
+- Convert the height map into visible output (e.g., grayscale shading or simple lighting effect).
+- Ensure smooth animation using requestAnimationFrame.
+
+4. Performance Constraints
+- Target ~60 FPS on a ~500×500 grid.
+- Avoid unnecessary memory allocations inside the animation loop.
+- Use double buffering for the simulation grid.
+
+5. Architecture
+- Clearly separate:
+  - Simulation logic
+  - Rendering logic
+  - Input handling
+- Keep the code modular and readable.
+
+6. Robustness
+- Handle window resizing correctly.
+- Support both mouse and touch input.
+- Ensure stability under multiple simultaneous ripple sources.
+
+Output Format:
+- Provide a single self-contained HTML file (with embedded CSS and JavaScript).
+- Include clear structure and minimal but meaningful comments.
