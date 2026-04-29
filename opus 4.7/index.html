@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<title>Water Ripple Simulation</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #cfe7ff;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+  #canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    cursor: crosshair;
+    background: #02101c;
+  }
+  #hud {
+    position: fixed;
+    top: 10px;
+    left: 12px;
+    font-size: 12px;
+    background: rgba(0, 0, 0, 0.35);
+    padding: 6px 10px;
+    border-radius: 6px;
+    backdrop-filter: blur(4px);
+    pointer-events: none;
+    line-height: 1.5;
+  }
+  #hud b { color: #7fd0ff; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="hud">
+  <b>Water Ripple</b><br/>
+  Click / drag / touch to make ripples<br/>
+  <span id="fps">--</span> fps &middot; grid <span id="dims">--</span>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+ * Water Ripple Simulation
+ *  - Discrete 2D wave equation on a height-map grid
+ *  - Double-buffered (prev / curr) with damping
+ *  - Canvas 2D rendering using a derivative-based shading
+ *  - Mouse + touch input with continuous drag injection
+ * ============================================================ */
+
+
+/* ---------- Simulation ---------- */
+const Sim = (() => {
+  let W = 0, H = 0;          // grid dimensions
+  let prev, curr;            // Float32Array height buffers (double buffer)
+  let damping = 0.992;       // energy retention per step (1 = no damping)
+
+  function resize(w, h) {
+    W = w | 0; H = h | 0;
+    prev = new Float32Array(W * H);
+    curr = new Float32Array(W * H);
+  }
+
+  /** Inject energy at (x,y) with given radius and amplitude. */
+  function splash(x, y, radius, amp) {
+    const r2 = radius * radius;
+    const x0 = Math.max(1, (x - radius) | 0);
+    const x1 = Math.min(W - 2, (x + radius) | 0);
+    const y0 = Math.max(1, (y - radius) | 0);
+    const y1 = Math.min(H - 2, (y + radius) | 0);
+    for (let j = y0; j <= y1; j++) {
+      const dy = j - y;
+      for (let i = x0; i <= x1; i++) {
+        const dx = i - x;
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= r2) {
+          // Smooth radial impulse (cosine falloff) added to previous buffer
+          const f = 0.5 + 0.5 * Math.cos(Math.PI * Math.sqrt(d2) / radius);
+          prev[j * W + i] -= amp * f;
+        }
+      }
+    }
+  }
+
+  /** Advance the simulation one step. */
+  function step() {
+    const w = W, h = H;
+    const c = curr, p = prev;
+    const d = damping;
+
+    // Finite-difference wave update (interior cells only)
+    for (let y = 1; y < h - 1; y++) {
+      let idx = y * w + 1;
+      for (let x = 1; x < w - 1; x++, idx++) {
+        const sum = c[idx - 1] + c[idx + 1] + c[idx - w] + c[idx + w];
+        // new = (avg of neighbors) - prev, then damp
+        let v = (sum * 0.5) - p[idx];
+        v *= d;
+        p[idx] = v;
+      }
+    }
+
+    // Swap buffers: prev becomes the new "current" frame
+    const tmp = prev;
+    prev = curr;
+    curr = tmp;
+  }
+
+  return {
+    resize, splash, step,
+    get width()  { return W; },
+    get height() { return H; },
+    get field()  { return curr; },
+  };
+})();
+
+
+/* ---------- Renderer ---------- */
+const Renderer = (() => {
+  let canvas, ctx, image, data32, scale = 2;
+
+  function init(canvasEl) {
+    canvas = canvasEl;
+    ctx = canvas.getContext("2d", { alpha: false });
+  }
+
+  /**
+   * Resize backing buffers.
+   * `scale` controls grid-to-pixel ratio (each grid cell -> scale*scale screen pixels).
+   */
+  function resize(cssW, cssH, gridScale) {
+    scale = gridScale;
+    const dpr = 1; // intentionally fixed; scaling handled via CSS stretch
+    canvas.width  = cssW;
+    canvas.height = cssH;
+    const gw = Math.max(8, Math.floor(cssW / scale));
+    const gh = Math.max(8, Math.floor(cssH / scale));
+    Sim.resize(gw, gh);
+    image = ctx.createImageData(gw, gh);
+    data32 = new Uint32Array(image.data.buffer);
+    return { gw, gh };
+  }
+
+  /**
+   * Draw current height field. Shading uses horizontal/vertical slope
+   * (gradient of the height map) to create a fake-lit water look.
+   */
+  function draw() {
+    const w = Sim.width, h = Sim.height;
+    const f = Sim.field;
+    const out = data32;
+
+    // Base water color (BGRA in little-endian Uint32)
+    const baseR = 14, baseG = 38, baseB = 70;
+
+    for (let y = 1; y < h - 1; y++) {
+      let idx = y * w + 1;
+      for (let x = 1; x < w - 1; x++, idx++) {
+        // Slope = gradient of height map
+        const sx = f[idx + 1] - f[idx - 1];
+        const sy = f[idx + w] - f[idx - w];
+
+        // Map slope to brightness offset
+        const light = (sx + sy) * 60;
+        const spec  = Math.max(0, -sx - sy) * 90; // simple specular highlight
+
+        let r = baseR + light + spec;
+        let g = baseG + light + spec;
+        let b = baseB + light * 1.2 + spec;
+
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+
+        // 0xAABBGGRR (little-endian)
+        out[idx] = (255 << 24) | ((b | 0) << 16) | ((g | 0) << 8) | (r | 0);
+      }
+    }
+
+    // Blit small grid then upscale to full canvas
+    ctx.putImageData(image, 0, 0);
+    if (scale !== 1) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(canvas, 0, 0, w, h, 0, 0, canvas.width, canvas.height);
+    }
+  }
+
+  return { init, resize, draw, get scale() { return scale; } };
+})();
+
+
+/* ---------- Input ---------- */
+const Input = (() => {
+  let canvas, lastX = -1, lastY = -1, active = false;
+  const touches = new Map();
+
+  function init(canvasEl) {
+    canvas = canvasEl;
+
+    canvas.addEventListener("mousedown", e => { active = true; inject(e.clientX, e.clientY, 1.4); });
+    canvas.addEventListener("mousemove", e => { if (active) inject(e.clientX, e.clientY, 0.7); });
+    window.addEventListener("mouseup",   () => { active = false; lastX = lastY = -1; });
+    canvas.addEventListener("mouseleave",() => { lastX = lastY = -1; });
+
+    canvas.addEventListener("touchstart", onTouch, { passive: false });
+    canvas.addEventListener("touchmove",  onTouch, { passive: false });
+    canvas.addEventListener("touchend",   onTouchEnd);
+    canvas.addEventListener("touchcancel",onTouchEnd);
+  }
+
+  function onTouch(e) {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const prev = touches.get(t.identifier);
+      const amp = prev ? 0.7 : 1.4;
+      inject(t.clientX, t.clientY, amp, prev);
+      touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+    }
+  }
+  function onTouchEnd(e) {
+    for (const t of e.changedTouches) touches.delete(t.identifier);
+  }
+
+  /** Convert client coords to grid coords and splash; interpolate from previous point for fast drags. */
+  function inject(cx, cy, amp, prevPoint) {
+    const rect = canvas.getBoundingClientRect();
+    const s = Renderer.scale;
+    const gx = (cx - rect.left) / s;
+    const gy = (cy - rect.top)  / s;
+
+    // Interpolate along a fast drag so no gaps between samples
+    const px = prevPoint ? (prevPoint.x - rect.left) / s : (lastX >= 0 ? lastX : gx);
+    const py = prevPoint ? (prevPoint.y - rect.top)  / s : (lastY >= 0 ? lastY : gy);
+    const dx = gx - px, dy = gy - py;
+    const dist = Math.hypot(dx, dy);
+    const steps = Math.max(1, Math.ceil(dist / 2));
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      Sim.splash(px + dx * t, py + dy * t, 4, amp);
+    }
+    lastX = gx; lastY = gy;
+  }
+
+  return { init };
+})();
+
+
+/* ---------- Boot / main loop ---------- */
+(() => {
+  const canvas  = document.getElementById("canvas");
+  const fpsEl   = document.getElementById("fps");
+  const dimsEl  = document.getElementById("dims");
+
+  Renderer.init(canvas);
+  Input.init(canvas);
+
+  /** Pick grid scale so cell count stays near ~500x500 budget. */
+  function pickScale(cssW, cssH) {
+    const target = 500;
+    const longest = Math.max(cssW, cssH);
+    return Math.max(1, Math.round(longest / target));
+  }
+
+  function handleResize() {
+    const cssW = window.innerWidth;
+    const cssH = window.innerHeight;
+    const scale = pickScale(cssW, cssH);
+    const { gw, gh } = Renderer.resize(cssW, cssH, scale);
+    dimsEl.textContent = gw + "×" + gh;
+  }
+
+  window.addEventListener("resize", handleResize);
+  handleResize();
+
+  // FPS counter
+  let frames = 0, fpsTime = performance.now();
+
+  function frame() {
+    // Two simulation sub-steps per render = visually smoother propagation
+    Sim.step();
+    Sim.step();
+    Renderer.draw();
+
+    frames++;
+    const now = performance.now();
+    if (now - fpsTime >= 500) {
+      fpsEl.textContent = (frames * 1000 / (now - fpsTime)).toFixed(0);
+      frames = 0;
+      fpsTime = now;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

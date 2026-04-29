@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Water Ripple Simulation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+
+        canvas {
+            display: block;
+            cursor: crosshair;
+            touch-action: none;
+        }
+
+        .instructions {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 14px;
+            pointer-events: none;
+        }
+
+        .instructions h2 {
+            margin-bottom: 10px;
+            font-size: 18px;
+        }
+
+        .instructions p {
+            margin: 5px 0;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <div class="instructions">
+        <h2>Water Ripple Simulation</h2>
+        <p>Click or touch to create ripples</p>
+        <p>Drag for continuous ripples</p>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        // ==================== CONFIGURATION ====================
+        const CONFIG = {
+            GRID_SIZE: 500,
+            DAMPING: 0.98,
+            WAVE_SPEED: 0.5,
+            INITIAL_ENERGY: 500,
+            RIPPLE_RADIUS: 3
+        };
+
+        // ==================== SIMULATION MODULE ====================
+        class WaveSimulation {
+            constructor(width, height) {
+                this.width = width;
+                this.height = height;
+                this.size = width * height;
+                
+                // Double buffering: current and previous states
+                this.current = new Float32Array(this.size);
+                this.previous = new Float32Array(this.size);
+            }
+
+            // Inject energy at a specific point
+            addEnergy(x, y, amount) {
+                const radius = CONFIG.RIPPLE_RADIUS;
+                
+                for (let dy = -radius; dy <= radius; dy++) {
+                    for (let dx = -radius; dx <= radius; dx++) {
+                        const px = x + dx;
+                        const py = y + dy;
+                        
+                        // Check bounds
+                        if (px >= 1 && px < this.width - 1 && py >= 1 && py < this.height - 1) {
+                            const distance = Math.sqrt(dx * dx + dy * dy);
+                            if (distance <= radius) {
+                                const falloff = 1 - (distance / radius);
+                                const index = py * this.width + px;
+                                this.current[index] += amount * falloff;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update simulation using finite difference wave equation
+            update() {
+                const damping = CONFIG.DAMPING;
+                const width = this.width;
+                const height = this.height;
+                
+                // Swap buffers
+                const temp = this.previous;
+                this.previous = this.current;
+                this.current = temp;
+                
+                const prev = this.previous;
+                const curr = this.current;
+                
+                // Apply wave equation: new_height = (neighbors_sum / 2) - old_height
+                // Then apply damping
+                for (let y = 1; y < height - 1; y++) {
+                    for (let x = 1; x < width - 1; x++) {
+                        const i = y * width + x;
+                        
+                        // Sum of four neighbors
+                        const neighbors = (
+                            prev[i - width] +     // top
+                            prev[i + width] +     // bottom
+                            prev[i - 1] +         // left
+                            prev[i + 1]           // right
+                        );
+                        
+                        // Wave equation with damping
+                        curr[i] = (neighbors / 2 - curr[i]) * damping;
+                    }
+                }
+            }
+
+            // Get height at a specific position
+            getHeight(x, y) {
+                if (x < 0 || x >= this.width || y < 0 || y >= this.height) {
+                    return 0;
+                }
+                return this.current[y * this.width + x];
+            }
+
+            // Resize the simulation grid
+            resize(newWidth, newHeight) {
+                this.width = newWidth;
+                this.height = newHeight;
+                this.size = newWidth * newHeight;
+                this.current = new Float32Array(this.size);
+                this.previous = new Float32Array(this.size);
+            }
+        }
+
+        // ==================== RENDERING MODULE ====================
+        class Renderer {
+            constructor(canvas, simulation) {
+                this.canvas = canvas;
+                this.ctx = canvas.getContext('2d', { willReadFrequently: true });
+                this.simulation = simulation;
+                this.imageData = null;
+            }
+
+            resize(width, height) {
+                this.canvas.width = width;
+                this.canvas.height = height;
+                this.imageData = this.ctx.createImageData(width, height);
+            }
+
+            render() {
+                const width = this.simulation.width;
+                const height = this.simulation.height;
+                const data = this.imageData.data;
+                const current = this.simulation.current;
+                
+                // Convert height map to pixel data
+                for (let y = 0; y < height; y++) {
+                    for (let x = 0; x < width; x++) {
+                        const i = y * width + x;
+                        const pixelIndex = i * 4;
+                        
+                        // Calculate gradient for lighting effect
+                        const heightValue = current[i];
+                        
+                        // Simple gradient calculation
+                        const left = current[i - 1] || heightValue;
+                        const right = current[i + 1] || heightValue;
+                        const top = current[i - width] || heightValue;
+                        const bottom = current[i + width] || heightValue;
+                        
+                        const dx = (right - left) * 2;
+                        const dy = (bottom - top) * 2;
+                        
+                        // Calculate lighting
+                        const lightX = -0.5;
+                        const lightY = -0.5;
+                        const lightZ = 1;
+                        
+                        const dot = dx * lightX + dy * lightY + lightZ;
+                        const intensity = Math.max(0, Math.min(255, dot * 50 + 128));
+                        
+                        // Set pixel color (blue-ish water with lighting)
+                        data[pixelIndex] = intensity * 0.3;     // R
+                        data[pixelIndex + 1] = intensity * 0.5; // G
+                        data[pixelIndex + 2] = intensity;       // B
+                        data[pixelIndex + 3] = 255;            // A
+                    }
+                }
+                
+                this.ctx.putImageData(this.imageData, 0, 0);
+            }
+        }
+
+        // ==================== INPUT HANDLER MODULE ====================
+        class InputHandler {
+            constructor(canvas, simulation) {
+                this.canvas = canvas;
+                this.simulation = simulation;
+                this.isPressed = false;
+                this.lastX = 0;
+                this.lastY = 0;
+                
+                this.setupMouseEvents();
+                this.setupTouchEvents();
+            }
+
+            setupMouseEvents() {
+                this.canvas.addEventListener('mousedown', (e) => {
+                    this.isPressed = true;
+                    this.handleInput(e.clientX, e.clientY);
+                });
+
+                this.canvas.addEventListener('mousemove', (e) => {
+                    if (this.isPressed) {
+                        this.handleInput(e.clientX, e.clientY);
+                    }
+                });
+
+                this.canvas.addEventListener('mouseup', () => {
+                    this.isPressed = false;
+                });
+
+                this.canvas.addEventListener('mouseleave', () => {
+                    this.isPressed = false;
+                });
+            }
+
+            setupTouchEvents() {
+                this.canvas.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    this.isPressed = true;
+                    const touch = e.touches[0];
+                    this.handleInput(touch.clientX, touch.clientY);
+                });
+
+                this.canvas.addEventListener('touchmove', (e) => {
+                    e.preventDefault();
+                    if (this.isPressed) {
+                        const touch = e.touches[0];
+                        this.handleInput(touch.clientX, touch.clientY);
+                    }
+                });
+
+                this.canvas.addEventListener('touchend', () => {
+                    this.isPressed = false;
+                });
+
+                this.canvas.addEventListener('touchcancel', () => {
+                    this.isPressed = false;
+                });
+            }
+
+            handleInput(clientX, clientY) {
+                const rect = this.canvas.getBoundingClientRect();
+                const x = Math.floor((clientX - rect.left) * (this.simulation.width / rect.width));
+                const y = Math.floor((clientY - rect.top) * (this.simulation.height / rect.height));
+                
+                // Add energy at the interaction point
+                this.simulation.addEnergy(x, y, CONFIG.INITIAL_ENERGY);
+            }
+        }
+
+        // ==================== MAIN APPLICATION ====================
+        class WaterRippleApp {
+            constructor() {
+                this.canvas = document.getElementById('canvas');
+                this.simulation = null;
+                this.renderer = null;
+                this.inputHandler = null;
+                this.animationId = null;
+                
+                this.init();
+                this.setupResize();
+                this.start();
+            }
+
+            init() {
+                // Calculate grid size based on window
+                const gridWidth = Math.min(CONFIG.GRID_SIZE, Math.floor(window.innerWidth / 2));
+                const gridHeight = Math.min(CONFIG.GRID_SIZE, Math.floor(window.innerHeight / 2));
+                
+                // Initialize simulation
+                this.simulation = new WaveSimulation(gridWidth, gridHeight);
+                
+                // Initialize renderer
+                this.renderer = new Renderer(this.canvas, this.simulation);
+                this.renderer.resize(gridWidth, gridHeight);
+                
+                // Initialize input handler
+                this.inputHandler = new InputHandler(this.canvas, this.simulation);
+            }
+
+            setupResize() {
+                let resizeTimeout;
+                
+                window.addEventListener('resize', () => {
+                    clearTimeout(resizeTimeout);
+                    resizeTimeout = setTimeout(() => {
+                        const gridWidth = Math.min(CONFIG.GRID_SIZE, Math.floor(window.innerWidth / 2));
+                        const gridHeight = Math.min(CONFIG.GRID_SIZE, Math.floor(window.innerHeight / 2));
+                        
+                        this.simulation.resize(gridWidth, gridHeight);
+                        this.renderer.resize(gridWidth, gridHeight);
+                    }, 250);
+                });
+            }
+
+            start() {
+                const animate = () => {
+                    this.simulation.update();
+                    this.renderer.render();
+                    this.animationId = requestAnimationFrame(animate);
+                };
+                
+                animate();
+            }
+        }
+
+        // Start the application when DOM is ready
+        document.addEventListener('DOMContentLoaded', () => {
+            new WaterRippleApp();
+        });
+    </script>
+</body>
+</html>

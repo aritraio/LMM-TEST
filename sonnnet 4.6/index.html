@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Interactive 2D water ripple simulation using HTML5 Canvas and the wave equation.">
+  <title>Water Ripple Simulation</title>
+  <style>
+    /* ── Reset & Page Layout ─────────────────────────────────── */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap');
+
+    body {
+      background: #0a0e17;
+      overflow: hidden;
+      font-family: 'Inter', system-ui, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    canvas {
+      display: block;
+      cursor: crosshair;
+      border-radius: 6px;
+      box-shadow:
+        0 0 40px rgba(56, 182, 255, 0.08),
+        0 0 80px rgba(56, 182, 255, 0.04);
+    }
+
+    /* ── HUD Overlay ─────────────────────────────────────────── */
+    #hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      color: rgba(160, 210, 255, 0.7);
+      font-size: 12px;
+      font-weight: 300;
+      letter-spacing: 0.5px;
+      line-height: 1.7;
+      pointer-events: none;
+      user-select: none;
+      z-index: 10;
+      text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+    }
+
+    #hud .label {
+      color: rgba(120, 170, 220, 0.5);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+    }
+
+    /* ── Instruction Toast ───────────────────────────────────── */
+    #toast {
+      position: fixed;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(180, 220, 255, 0.6);
+      font-size: 13px;
+      font-weight: 400;
+      letter-spacing: 0.3px;
+      pointer-events: none;
+      user-select: none;
+      z-index: 10;
+      transition: opacity 1.5s ease;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.4);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="rippleCanvas"></canvas>
+
+  <div id="hud">
+    <div class="label">Performance</div>
+    <div id="fpsDisplay">FPS: --</div>
+    <div id="gridDisplay">Grid: --</div>
+  </div>
+
+  <div id="toast">Click or touch the surface to create ripples</div>
+
+  <script>
+  /* ================================================================
+   *  WATER RIPPLE SIMULATION
+   *  ────────────────────────
+   *  A 2D wave equation simulation rendered via Canvas 2D.
+   *  Architecture:
+   *    1. Simulation  – finite-difference wave propagation
+   *    2. Renderer     – height-map → pixel conversion
+   *    3. InputHandler – mouse & touch → energy injection
+   *    4. App          – orchestration & resize handling
+   * ================================================================ */
+
+  // ── 1. SIMULATION ─────────────────────────────────────────────────
+  // Solves the discrete wave equation with damping on a 2D grid.
+  // Uses double-buffering: two flat Float32Arrays swapped each frame.
+
+  class WaveSimulation {
+    /**
+     * @param {number} width  – grid columns
+     * @param {number} height – grid rows
+     * @param {number} damping – energy loss per step (0–1, lower = more loss)
+     */
+    constructor(width, height, damping = 0.96) {
+      this.width  = width;
+      this.height = height;
+      this.damping = damping;
+
+      // Double-buffered height maps (flat arrays for cache friendliness)
+      const size = width * height;
+      this.current  = new Float32Array(size);
+      this.previous = new Float32Array(size);
+    }
+
+    /** Resize the simulation grid, clearing all state. */
+    resize(width, height) {
+      this.width  = width;
+      this.height = height;
+      const size = width * height;
+      this.current  = new Float32Array(size);
+      this.previous = new Float32Array(size);
+    }
+
+    /**
+     * Inject energy at a point, creating a circular ripple source.
+     * @param {number} cx – center x (grid coords)
+     * @param {number} cy – center y (grid coords)
+     * @param {number} radius – splash radius in cells
+     * @param {number} amplitude – peak displacement
+     */
+    addDrop(cx, cy, radius, amplitude) {
+      const w = this.width;
+      const h = this.height;
+      const r2 = radius * radius;
+
+      const x0 = Math.max(0, Math.floor(cx - radius));
+      const x1 = Math.min(w - 1, Math.ceil(cx + radius));
+      const y0 = Math.max(0, Math.floor(cy - radius));
+      const y1 = Math.min(h - 1, Math.ceil(cy + radius));
+
+      for (let y = y0; y <= y1; y++) {
+        const rowOffset = y * w;
+        const dy = y - cy;
+        const dy2 = dy * dy;
+        for (let x = x0; x <= x1; x++) {
+          const dx = x - cx;
+          const dist2 = dx * dx + dy2;
+          if (dist2 < r2) {
+            // Cosine bell profile for smooth injection
+            const t = Math.sqrt(dist2) / radius;
+            this.current[rowOffset + x] += amplitude * (Math.cos(t * Math.PI) + 1) * 0.5;
+          }
+        }
+      }
+    }
+
+    /**
+     * Advance the simulation by one time step.
+     * Finite-difference scheme:
+     *   next[i] = 2·current[i] − previous[i] + c²·Δ²current[i]
+     * where Δ² is the discrete Laplacian, followed by damping.
+     */
+    step() {
+      const w   = this.width;
+      const h   = this.height;
+      const cur = this.current;
+      const prv = this.previous;
+      const dmp = this.damping;
+
+      // Wave speed² (kept ≤ 0.5 for stability of the explicit scheme)
+      const c2 = 0.48;
+
+      for (let y = 1; y < h - 1; y++) {
+        const row  = y * w;
+        const rowU = row - w; // row above
+        const rowD = row + w; // row below
+
+        for (let x = 1; x < w - 1; x++) {
+          const idx = row + x;
+
+          // Discrete Laplacian (4-neighbour stencil)
+          const laplacian =
+            cur[idx - 1] + cur[idx + 1] +
+            cur[rowU + x] + cur[rowD + x] -
+            4 * cur[idx];
+
+          // Verlet-style integration with damping
+          prv[idx] = (2 * cur[idx] - prv[idx] + c2 * laplacian) * dmp;
+        }
+      }
+
+      // Swap buffers (previous now holds the new state)
+      this.previous = cur;
+      this.current  = prv;
+    }
+  }
+
+
+  // ── 2. RENDERER ───────────────────────────────────────────────────
+  // Converts the height map into a visual representation on canvas.
+  // Uses direct pixel manipulation via ImageData for performance.
+
+  class WaveRenderer {
+    /**
+     * @param {HTMLCanvasElement} canvas
+     */
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext('2d', { willReadFrequently: false });
+      this.imageData = null;
+      this.pixels = null;
+    }
+
+    /** Re-create the ImageData buffer to match canvas size. */
+    resize(width, height) {
+      this.canvas.width  = width;
+      this.canvas.height = height;
+      this.imageData = this.ctx.createImageData(width, height);
+      this.pixels = new Uint32Array(this.imageData.data.buffer);
+    }
+
+    /**
+     * Render the height map as a water-like surface.
+     * Uses the height gradient to simulate caustic-style lighting.
+     * @param {Float32Array} heightMap
+     * @param {number} gridW
+     * @param {number} gridH
+     */
+    render(heightMap, gridW, gridH) {
+      const pixels = this.pixels;
+      const w = gridW;
+
+      for (let y = 1; y < gridH - 1; y++) {
+        const row  = y * w;
+        const rowU = row - w;
+
+        for (let x = 1; x < w - 1; x++) {
+          const idx = row + x;
+
+          // Compute surface gradient for pseudo-lighting
+          const dx = heightMap[idx - 1] - heightMap[idx + 1];
+          const dy = heightMap[rowU + x] - heightMap[row + w + x];
+
+          // Base deep water colour + displacement-based shading
+          const light = dx * 80;    // lateral highlight intensity
+          const depth = dy * 60;    // vertical depth shading
+
+          // Deep ocean palette: dark blue base with caustic highlights
+          const r = Math.max(0, Math.min(255, 8  + light * 0.3 + depth * 0.15));
+          const g = Math.max(0, Math.min(255, 24 + light * 0.6 + depth * 0.4));
+          const b = Math.max(0, Math.min(255, 58 + light * 1.2 + depth * 0.9));
+
+          // Pack RGBA into a single Uint32 (little-endian: ABGR)
+          pixels[idx] = (255 << 24) | (b << 16) | (g << 8) | r;
+        }
+      }
+
+      // Fill border pixels with deep water base colour (0xFF3A1808 → ABGR)
+      const borderColour = (255 << 24) | (58 << 16) | (24 << 8) | 8;
+
+      // Top & bottom rows
+      for (let x = 0; x < w; x++) {
+        pixels[x] = borderColour;
+        pixels[(gridH - 1) * w + x] = borderColour;
+      }
+      // Left & right columns
+      for (let y = 0; y < gridH; y++) {
+        pixels[y * w] = borderColour;
+        pixels[y * w + w - 1] = borderColour;
+      }
+
+      this.ctx.putImageData(this.imageData, 0, 0);
+    }
+  }
+
+
+  // ── 3. INPUT HANDLER ──────────────────────────────────────────────
+  // Normalises mouse and touch events into simulation-space coordinates,
+  // injecting energy into the wave simulation.
+
+  class InputHandler {
+    /**
+     * @param {HTMLCanvasElement} canvas
+     * @param {WaveSimulation} simulation
+     */
+    constructor(canvas, simulation) {
+      this.canvas     = canvas;
+      this.simulation = simulation;
+      this.isPointerDown = false;
+
+      // Pre-bound handlers for clean add/removeEventListener
+      this._onPointerDown = this._handlePointerDown.bind(this);
+      this._onPointerMove = this._handlePointerMove.bind(this);
+      this._onPointerUp   = this._handlePointerUp.bind(this);
+      this._onTouchStart  = this._handleTouchStart.bind(this);
+      this._onTouchMove   = this._handleTouchMove.bind(this);
+      this._onTouchEnd    = this._handleTouchEnd.bind(this);
+
+      this._attach();
+    }
+
+    _attach() {
+      const c = this.canvas;
+      // Mouse events
+      c.addEventListener('mousedown',  this._onPointerDown);
+      c.addEventListener('mousemove',  this._onPointerMove);
+      c.addEventListener('mouseup',    this._onPointerUp);
+      c.addEventListener('mouseleave', this._onPointerUp);
+
+      // Touch events
+      c.addEventListener('touchstart', this._onTouchStart, { passive: false });
+      c.addEventListener('touchmove',  this._onTouchMove,  { passive: false });
+      c.addEventListener('touchend',   this._onTouchEnd);
+    }
+
+    /** Convert a page-space coordinate to grid-space. */
+    _toGrid(pageX, pageY) {
+      const rect = this.canvas.getBoundingClientRect();
+      const scaleX = this.simulation.width  / rect.width;
+      const scaleY = this.simulation.height / rect.height;
+      return {
+        x: (pageX - rect.left) * scaleX,
+        y: (pageY - rect.top)  * scaleY
+      };
+    }
+
+    /** Inject a ripple at the given page coordinates. */
+    _injectAt(pageX, pageY) {
+      const { x, y } = this._toGrid(pageX, pageY);
+      this.simulation.addDrop(x, y, 4, 512);
+    }
+
+    _handlePointerDown(e) {
+      this.isPointerDown = true;
+      this._injectAt(e.clientX, e.clientY);
+    }
+
+    _handlePointerMove(e) {
+      if (!this.isPointerDown) return;
+      this._injectAt(e.clientX, e.clientY);
+    }
+
+    _handlePointerUp() {
+      this.isPointerDown = false;
+    }
+
+    _handleTouchStart(e) {
+      e.preventDefault(); // Prevent scroll / zoom
+      for (const touch of e.changedTouches) {
+        this._injectAt(touch.clientX, touch.clientY);
+      }
+    }
+
+    _handleTouchMove(e) {
+      e.preventDefault();
+      for (const touch of e.changedTouches) {
+        this._injectAt(touch.clientX, touch.clientY);
+      }
+    }
+
+    _handleTouchEnd() {
+      // No-op; touch-based interaction doesn't need explicit "up" tracking
+    }
+  }
+
+
+  // ── 4. APPLICATION ────────────────────────────────────────────────
+  // Orchestrates simulation, rendering, input, and resize handling.
+
+  class RippleApp {
+    constructor() {
+      this.canvas = document.getElementById('rippleCanvas');
+
+      // Determine grid dimensions from viewport
+      const { gridW, gridH, displayW, displayH } = this._computeDimensions();
+
+      this.simulation = new WaveSimulation(gridW, gridH, 0.965);
+      this.renderer   = new WaveRenderer(this.canvas);
+      this.renderer.resize(gridW, gridH);
+
+      // Scale canvas element to fill viewport while keeping grid resolution
+      this.canvas.style.width  = displayW + 'px';
+      this.canvas.style.height = displayH + 'px';
+
+      this.input = new InputHandler(this.canvas, this.simulation);
+
+      // FPS tracking
+      this._frameCount = 0;
+      this._lastFpsTime = performance.now();
+      this._fps = 0;
+
+      // HUD elements
+      this._fpsEl  = document.getElementById('fpsDisplay');
+      this._gridEl = document.getElementById('gridDisplay');
+      this._toast  = document.getElementById('toast');
+      this._gridEl.textContent = `Grid: ${gridW}×${gridH}`;
+
+      // Fade out the instruction toast after 4 seconds
+      setTimeout(() => { this._toast.style.opacity = '0'; }, 4000);
+
+      // Handle window resize
+      this._resizeTimeout = null;
+      window.addEventListener('resize', () => {
+        clearTimeout(this._resizeTimeout);
+        this._resizeTimeout = setTimeout(() => this._handleResize(), 200);
+      });
+
+      // Initial ambient drops for visual polish
+      this._scheduleAmbientDrops();
+
+      // Start the loop
+      this._boundLoop = this._loop.bind(this);
+      requestAnimationFrame(this._boundLoop);
+    }
+
+    /**
+     * Compute grid and display dimensions based on viewport.
+     * Grid is capped at ~500 cells on the longest axis for performance.
+     */
+    _computeDimensions() {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const maxGrid = 500;
+
+      let gridW, gridH;
+      if (vw >= vh) {
+        gridW = maxGrid;
+        gridH = Math.round(maxGrid * (vh / vw));
+      } else {
+        gridH = maxGrid;
+        gridW = Math.round(maxGrid * (vw / vh));
+      }
+
+      // Display size fills viewport with a small margin
+      const margin = 0;
+      const displayW = vw - margin;
+      const displayH = vh - margin;
+
+      return { gridW, gridH, displayW, displayH };
+    }
+
+    /** Handle window resize by re-initialising grid and renderer. */
+    _handleResize() {
+      const { gridW, gridH, displayW, displayH } = this._computeDimensions();
+
+      this.simulation.resize(gridW, gridH);
+      this.renderer.resize(gridW, gridH);
+
+      this.canvas.style.width  = displayW + 'px';
+      this.canvas.style.height = displayH + 'px';
+
+      this._gridEl.textContent = `Grid: ${gridW}×${gridH}`;
+    }
+
+    /** Drop a few random ripples on start for ambience. */
+    _scheduleAmbientDrops() {
+      const sim = this.simulation;
+      const w = sim.width;
+      const h = sim.height;
+
+      // Three gentle drops at random positions
+      for (let i = 0; i < 3; i++) {
+        setTimeout(() => {
+          const x = 0.2 * w + Math.random() * 0.6 * w;
+          const y = 0.2 * h + Math.random() * 0.6 * h;
+          sim.addDrop(x, y, 5, 256);
+        }, 300 + i * 600);
+      }
+    }
+
+    /** Main animation loop. */
+    _loop(timestamp) {
+      // Advance physics
+      this.simulation.step();
+
+      // Render current state
+      this.renderer.render(
+        this.simulation.current,
+        this.simulation.width,
+        this.simulation.height
+      );
+
+      // FPS counter (update every 30 frames to reduce DOM writes)
+      this._frameCount++;
+      if (this._frameCount % 30 === 0) {
+        const now = performance.now();
+        const elapsed = now - this._lastFpsTime;
+        this._fps = Math.round(30000 / elapsed);
+        this._lastFpsTime = now;
+        this._fpsEl.textContent = `FPS: ${this._fps}`;
+      }
+
+      requestAnimationFrame(this._boundLoop);
+    }
+  }
+
+  // ── Boot ──────────────────────────────────────────────────────────
+  window.addEventListener('DOMContentLoaded', () => { new RippleApp(); });
+  </script>
+</body>
+</html>
