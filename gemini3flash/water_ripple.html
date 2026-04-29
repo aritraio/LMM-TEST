@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fluidic - Interactive Water Simulation</title>
+    <style>
+        :root {
+            --bg-color: #050505;
+            --accent-color: #00f2ff;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            color: white;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        canvas {
+            display: block;
+            touch-action: none; /* Prevent scrolling on mobile */
+            cursor: crosshair;
+            box-shadow: 0 0 50px rgba(0, 242, 255, 0.1);
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        h1 {
+            font-size: 1.2rem;
+            font-weight: 300;
+            letter-spacing: 0.2rem;
+            text-transform: uppercase;
+            opacity: 0.8;
+            margin-bottom: 5px;
+        }
+
+        p {
+            font-size: 0.8rem;
+            opacity: 0.5;
+        }
+
+        #fps-counter {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            font-family: monospace;
+            font-size: 0.7rem;
+            opacity: 0.4;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1>Fluidic</h1>
+        <p>Click or drag to create ripples</p>
+    </div>
+    <div id="container">
+        <canvas id="waterCanvas"></canvas>
+    </div>
+    <div id="fps-counter">FPS: --</div>
+
+    <script>
+        /**
+         * Simulation Logic: 2D Wave Equation
+         * Implements a discrete height map grid with finite difference approximation.
+         */
+        class RippleSimulation {
+            constructor(width, height) {
+                this.width = width;
+                this.height = height;
+                this.size = width * height;
+                this.damping = 0.985;
+                
+                // Double buffering for physics
+                this.buffer1 = new Float32Array(this.size);
+                this.buffer2 = new Float32Array(this.size);
+            }
+
+            update() {
+                const { width, height, buffer1, buffer2, damping } = this;
+                
+                // Skip boundaries to avoid out-of-bounds checks
+                for (let y = 1; y < height - 1; y++) {
+                    const row = y * width;
+                    for (let x = 1; x < width - 1; x++) {
+                        const i = row + x;
+                        
+                        // Discrete Wave Equation:
+                        // new_height = (avg_neighbors * 2 - old_height)
+                        // This approximates the second-order partial derivative in time.
+                        buffer2[i] = (
+                            buffer1[i - 1] +
+                            buffer1[i + 1] +
+                            buffer1[i - width] +
+                            buffer1[i + width]
+                        ) * 0.5 - buffer2[i];
+                        
+                        // Apply energy loss
+                        buffer2[i] *= damping;
+                    }
+                }
+
+                // Swap buffers
+                this.buffer1 = buffer2;
+                this.buffer2 = buffer1;
+            }
+
+            inject(x, y, strength = 512) {
+                if (x < 1 || x >= this.width - 1 || y < 1 || y >= this.height - 1) return;
+                
+                const idx = Math.floor(y) * this.width + Math.floor(x);
+                this.buffer1[idx] += strength;
+            }
+        }
+
+        /**
+         * Rendering Logic: Canvas 2D Optimization
+         * Converts height map to pixel data with lighting effects.
+         */
+        class Renderer {
+            constructor(canvas, simWidth, simHeight) {
+                this.canvas = canvas;
+                this.ctx = canvas.getContext('2d', { alpha: false });
+                this.simWidth = simWidth;
+                this.simHeight = simHeight;
+                
+                // Fixed size simulation grid
+                this.canvas.width = simWidth;
+                this.canvas.height = simHeight;
+                
+                this.imageData = this.ctx.createImageData(simWidth, simHeight);
+                this.pixels = this.imageData.data;
+            }
+
+            draw(simulation) {
+                const { simWidth, simHeight, pixels, imageData, ctx } = this;
+                const buffer = simulation.buffer1;
+                
+                for (let i = 0; i < simulation.size; i++) {
+                    const pixelIdx = i * 4;
+                    
+                    // Simple lighting calculation based on surface gradient
+                    // We look at the difference between adjacent cells
+                    let val = 0;
+                    if (i > simWidth && i < simulation.size - simWidth) {
+                        // Approximate refraction/reflection by gradient
+                        const dx = buffer[i - 1] - buffer[i + 1];
+                        const dy = buffer[i - simWidth] - buffer[i + simWidth];
+                        val = dx + dy;
+                    }
+
+                    // Map height/gradient to color
+                    // Base color is dark blue, highlights are cyan
+                    const baseR = 5, baseG = 10, baseB = 20;
+                    const highlightR = 0, highlightG = 242, highlightB = 255;
+                    
+                    // Clamp and normalize value for visual effect
+                    const factor = Math.max(0, Math.min(1, 0.5 + val * 0.05));
+                    const shade = Math.max(0, Math.min(255, val * 2.5));
+
+                    pixels[pixelIdx] = baseR + shade * 0.2;
+                    pixels[pixelIdx + 1] = baseG + shade * 0.8;
+                    pixels[pixelIdx + 2] = baseB + shade;
+                    pixels[pixelIdx + 3] = 255;
+                }
+                
+                ctx.putImageData(imageData, 0, 0);
+            }
+
+            resize(containerWidth, containerHeight) {
+                // Keep the simulation grid resolution fixed for performance, 
+                // but scale the canvas via CSS for visual coverage.
+                const scale = Math.min(containerWidth / this.simWidth, containerHeight / this.simHeight);
+                this.canvas.style.width = `${this.simWidth * scale}px`;
+                this.canvas.style.height = `${this.simHeight * scale}px`;
+            }
+        }
+
+        /**
+         * Input Handling: Mouse and Touch
+         */
+        class InputHandler {
+            constructor(canvas, onInput) {
+                this.canvas = canvas;
+                this.onInput = onInput;
+                this.isPressed = false;
+                
+                this.setupEvents();
+            }
+
+            setupEvents() {
+                const handleInput = (e) => {
+                    const rect = this.canvas.getBoundingClientRect();
+                    const scaleX = this.canvas.width / rect.width;
+                    const scaleY = this.canvas.height / rect.height;
+                    
+                    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                    
+                    const x = (clientX - rect.left) * scaleX;
+                    const y = (clientY - rect.top) * scaleY;
+                    
+                    this.onInput(x, y);
+                };
+
+                const start = (e) => {
+                    this.isPressed = true;
+                    handleInput(e);
+                };
+                const move = (e) => {
+                    if (this.isPressed) handleInput(e);
+                };
+                const end = () => {
+                    this.isPressed = false;
+                };
+
+                this.canvas.addEventListener('mousedown', start);
+                window.addEventListener('mousemove', move);
+                window.addEventListener('mouseup', end);
+                
+                this.canvas.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    start(e);
+                }, { passive: false });
+                this.canvas.addEventListener('touchmove', (e) => {
+                    e.preventDefault();
+                    move(e);
+                }, { passive: false });
+                this.canvas.addEventListener('touchend', end);
+            }
+        }
+
+        /**
+         * Main App Controller
+         */
+        class App {
+            constructor() {
+                this.simWidth = 512;
+                this.simHeight = 512;
+                
+                this.simulation = new RippleSimulation(this.simWidth, this.simHeight);
+                this.renderer = new Renderer(document.getElementById('waterCanvas'), this.simWidth, this.simHeight);
+                this.input = new InputHandler(this.renderer.canvas, (x, y) => this.simulation.inject(x, y));
+                
+                this.fpsElement = document.getElementById('fps-counter');
+                this.lastTime = 0;
+                this.frames = 0;
+                
+                window.addEventListener('resize', () => this.onResize());
+                this.onResize();
+                
+                this.loop = this.loop.bind(this);
+                requestAnimationFrame(this.loop);
+            }
+
+            onResize() {
+                this.renderer.resize(window.innerWidth, window.innerHeight);
+            }
+
+            loop(time) {
+                // Physics update
+                this.simulation.update();
+                
+                // Rendering
+                this.renderer.draw(this.simulation);
+                
+                // FPS Tracking
+                this.frames++;
+                if (time > this.lastTime + 1000) {
+                    const fps = Math.round((this.frames * 1000) / (time - this.lastTime));
+                    this.fpsElement.innerText = `FPS: ${fps}`;
+                    this.lastTime = time;
+                    this.frames = 0;
+                }
+                
+                requestAnimationFrame(this.loop);
+            }
+        }
+
+        // Initialize the application
+        window.addEventListener('DOMContentLoaded', () => {
+            new App();
+        });
+    </script>
+</body>
+</html>

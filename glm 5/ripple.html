@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Water Ripple Simulation</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+// ─── Configuration ───────────────────────────────────────────────
+const CFG = {
+  DAMPING: 0.97,           // Energy retained per step (0–1)
+  RIPPLE_RADIUS: 3,        // Injection kernel radius in grid cells
+  RIPPLE_STRENGTH: 512,    // Energy magnitude per click
+  GRID_SCALE: 2,           // Pixels per grid cell (2 ≈ 500×500 grid on 1080p)
+};
+
+// ─── Simulation Module ───────────────────────────────────────────
+const Simulation = (() => {
+  let cols, rows;
+  let bufA, bufB;          // Double-buffered height maps
+  let current, previous;   // References into the two buffers
+
+  function init(width, height, scale) {
+    cols = Math.floor(width / scale);
+    rows = Math.floor(height / scale);
+    bufA = new Float32Array(cols * rows);
+    bufB = new Float32Array(cols * rows);
+    current = bufA;
+    previous = bufB;
+  }
+
+  // Inject energy at (cx, cy) grid coordinates
+  function inject(cx, cy, strength, radius) {
+    const r2 = radius * radius;
+    const x0 = Math.max(0, cx - radius);
+    const x1 = Math.min(cols - 1, cx + radius);
+    const y0 = Math.max(0, cy - radius);
+    const y1 = Math.min(rows - 1, cy + radius);
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx, dy = y - cy;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < r2) {
+          current[y * cols + x] += strength * (1 - d2 / r2);
+        }
+      }
+    }
+  }
+
+  // One simulation step: finite-difference wave equation with damping
+  function step(damping) {
+    const next = (current === bufA) ? bufB : bufA;
+    for (let y = 1; y < rows - 1; y++) {
+      const rowOff = y * cols;
+      for (let x = 1; x < cols - 1; x++) {
+        const i = rowOff + x;
+        // Laplacian of previous step (4-neighbour stencil)
+        const laplacian = previous[i - 1] + previous[i + 1]
+                        + previous[i - cols] + previous[i + cols]
+                        - 4 * previous[i];
+        // Wave equation: next = 2*current - previous + c²*laplacian
+        // With c=1 and implicit time-step this simplifies to:
+        next[i] = (2 * current[i] - previous[i] + laplacian) * damping;
+      }
+    }
+    // Swap buffers
+    previous = current;
+    current = next;
+  }
+
+  function getCurrent() { return current; }
+  function getCols() { return cols; }
+  function getRows() { return rows; }
+
+  return { init, inject, step, getCurrent, getCols, getRows };
+})();
+
+// ─── Rendering Module ─────────────────────────────────────────────
+const Renderer = (() => {
+  let canvas, ctx;
+  let imageData, pixels;    // Reused every frame (no allocation in loop)
+  let simCols, simRows, scale;
+  let offCanvas, offCtx;    // Pre-allocated offscreen canvas for scaling
+
+  function init(canvasEl, cols, rows, gridScale) {
+    canvas = canvasEl;
+    ctx = canvas.getContext('2d');
+    simCols = cols;
+    simRows = rows;
+    scale = gridScale;
+    imageData = ctx.createImageData(cols, rows);
+    pixels = imageData.data;
+    // Fill alpha channel so edge pixels aren't transparent
+    for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
+    // Pre-allocate offscreen canvas (used when scale > 1)
+    offCanvas = document.createElement('canvas');
+    offCanvas.width = cols;
+    offCanvas.height = rows;
+    offCtx = offCanvas.getContext('2d');
+  }
+
+  // Convert height map to visible output with pseudo-lighting
+  function render(heightMap) {
+    const c = simCols, r = simRows;
+    for (let y = 1; y < r - 1; y++) {
+      const rowOff = y * c;
+      for (let x = 1; x < c - 1; x++) {
+        const i = rowOff + x;
+        // Gradients for pseudo-lighting (light from top-left)
+        const dx = heightMap[i + 1] - heightMap[i - 1];
+        const dy = heightMap[i + c] - heightMap[i - c];
+        // Base brightness + directional shading
+        const base = 128 + heightMap[i] * 0.4;
+        const shade = (dx + dy) * 6;
+        const v = base + shade;
+        const p = i << 2;
+        // Blue-tinted water colour, clamped via Uint8ClampedArray
+        pixels[p]     = v * 0.55;
+        pixels[p + 1] = v * 0.78;
+        pixels[p + 2] = v;
+        pixels[p + 3] = 255;
+      }
+    }
+
+    if (scale === 1) {
+      ctx.putImageData(imageData, 0, 0);
+    } else {
+      offCtx.putImageData(imageData, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(offCanvas, 0, 0, canvas.width, canvas.height);
+    }
+  }
+
+  return { init, render };
+})();
+
+// ─── Input Module ─────────────────────────────────────────────────
+const Input = (() => {
+  let canvas, scale;
+  let active = false;
+
+  function init(canvasEl, gridScale) {
+    canvas = canvasEl;
+    scale = gridScale;
+
+    // Mouse events
+    canvas.addEventListener('mousedown', (e) => { active = true; handleInput(e.clientX, e.clientY); });
+    canvas.addEventListener('mousemove', (e) => { if (active) handleInput(e.clientX, e.clientY); });
+    canvas.addEventListener('mouseup', () => { active = false; });
+    canvas.addEventListener('mouseleave', () => { active = false; });
+
+    // Touch events
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) handleInput(t.clientX, t.clientY);
+    }, { passive: false });
+    canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) handleInput(t.clientX, t.clientY);
+    }, { passive: false });
+  }
+
+  function handleInput(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const gx = Math.floor((clientX - rect.left) / scale);
+    const gy = Math.floor((clientY - rect.top) / scale);
+    Simulation.inject(gx, gy, CFG.RIPPLE_STRENGTH, CFG.RIPPLE_RADIUS);
+  }
+
+  function setScale(s) { scale = s; }
+
+  return { init, setScale };
+})();
+
+// ─── Main Loop ────────────────────────────────────────────────────
+const canvas = document.getElementById('canvas');
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  const scale = CFG.GRID_SCALE;
+  Simulation.init(canvas.width, canvas.height, scale);
+  Renderer.init(canvas, Simulation.getCols(), Simulation.getRows(), scale);
+  Input.setScale(scale);
+}
+
+function loop() {
+  Simulation.step(CFG.DAMPING);
+  Renderer.render(Simulation.getCurrent());
+  requestAnimationFrame(loop);
+}
+
+// Initialize
+resize();
+Input.init(canvas, CFG.GRID_SCALE);
+window.addEventListener('resize', resize);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+- [x] Create HTML structure and CSS for full-screen canvas
+- [x] Implement `RippleSimulation` class with double-buffered physics
+- [x] Implement `Renderer` class using `ImageData` for performance
+- [x] Implement `InputHandler` for mouse and touch events
+- [x] Implement `App` class to manage the simulation loop
+- [x] Add polishing touches (styling, resizing support)
+- [x] Verify logic and performance constraints

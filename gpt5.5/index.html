@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Interactive Water Ripple Simulation</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top left, rgba(73, 180, 255, 0.22), transparent 34rem),
+        linear-gradient(135deg, #06111f 0%, #081827 48%, #020713 100%);
+      color: #eef8ff;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: crosshair;
+      touch-action: none;
+    }
+
+    .panel {
+      position: fixed;
+      top: 1rem;
+      left: 1rem;
+      max-width: min(24rem, calc(100vw - 2rem));
+      padding: 0.9rem 1rem;
+      border: 1px solid rgba(180, 225, 255, 0.18);
+      border-radius: 1rem;
+      background: rgba(4, 12, 24, 0.62);
+      box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.3);
+      backdrop-filter: blur(14px);
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .panel h1 {
+      margin: 0 0 0.35rem;
+      font-size: 1rem;
+      letter-spacing: 0.02em;
+    }
+
+    .panel p {
+      margin: 0;
+      color: rgba(238, 248, 255, 0.76);
+      font-size: 0.86rem;
+      line-height: 1.45;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      margin-top: 0.7rem;
+      padding: 0.28rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(99, 204, 255, 0.14);
+      color: rgba(211, 242, 255, 0.92);
+      font-size: 0.75rem;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="rippleCanvas" aria-label="Interactive water ripple simulation"></canvas>
+  <section class="panel" aria-hidden="true">
+    <h1>Water Ripple Simulation</h1>
+    <p>Click, drag, or touch the water to inject wave energy. Multiple ripples interfere through a finite-difference height map.</p>
+    <span class="badge">Canvas 2D · Double buffered · Resize safe</span>
+  </section>
+
+  <script>
+    class WaveSimulation {
+      constructor(width, height) {
+        this.damping = 0.992;
+        this.impulseRadius = 6;
+        this.impulseStrength = 850;
+        this.resize(width, height);
+      }
+
+      resize(width, height) {
+        this.width = Math.max(2, width | 0);
+        this.height = Math.max(2, height | 0);
+        this.size = this.width * this.height;
+        this.current = new Float32Array(this.size);
+        this.previous = new Float32Array(this.size);
+      }
+
+      disturb(x, y, strength = this.impulseStrength, radius = this.impulseRadius) {
+        const cx = Math.round(x);
+        const cy = Math.round(y);
+        const r = Math.max(1, radius | 0);
+        const r2 = r * r;
+        const minX = Math.max(1, cx - r);
+        const maxX = Math.min(this.width - 2, cx + r);
+        const minY = Math.max(1, cy - r);
+        const maxY = Math.min(this.height - 2, cy + r);
+
+        for (let yy = minY; yy <= maxY; yy++) {
+          const dy = yy - cy;
+          const row = yy * this.width;
+
+          for (let xx = minX; xx <= maxX; xx++) {
+            const dx = xx - cx;
+            const distance2 = dx * dx + dy * dy;
+
+            if (distance2 <= r2) {
+              const falloff = 1 - distance2 / r2;
+              this.current[row + xx] += strength * falloff * falloff;
+            }
+          }
+        }
+      }
+
+      step() {
+        const width = this.width;
+        const height = this.height;
+        const current = this.current;
+        const previous = this.previous;
+        const damping = this.damping;
+
+        for (let y = 1; y < height - 1; y++) {
+          const row = y * width;
+          const rowAbove = row - width;
+          const rowBelow = row + width;
+
+          for (let x = 1; x < width - 1; x++) {
+            const i = row + x;
+            previous[i] = (
+              (current[i - 1] + current[i + 1] + current[rowAbove + x] + current[rowBelow + x]) * 0.5 -
+              previous[i]
+            ) * damping;
+          }
+        }
+
+        this.current = previous;
+        this.previous = current;
+      }
+    }
+
+    class RippleRenderer {
+      constructor(canvas, simulation) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d', { alpha: false });
+        this.simulation = simulation;
+        this.pixelRatio = 1;
+        this.resize();
+      }
+
+      resize() {
+        this.pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+        this.displayWidth = window.innerWidth;
+        this.displayHeight = window.innerHeight;
+        this.canvas.width = Math.round(this.displayWidth * this.pixelRatio);
+        this.canvas.height = Math.round(this.displayHeight * this.pixelRatio);
+        this.canvas.style.width = `${this.displayWidth}px`;
+        this.canvas.style.height = `${this.displayHeight}px`;
+
+        this.renderWidth = this.simulation.width;
+        this.renderHeight = this.simulation.height;
+        this.imageData = this.ctx.createImageData(this.renderWidth, this.renderHeight);
+        this.pixels = this.imageData.data;
+      }
+
+      draw() {
+        const width = this.simulation.width;
+        const height = this.simulation.height;
+        const field = this.simulation.current;
+        const pixels = this.pixels;
+        let p = 0;
+
+        for (let y = 0; y < height; y++) {
+          const row = y * width;
+          const yEdgeFade = Math.min(y, height - 1 - y, 28) / 28;
+
+          for (let x = 0; x < width; x++) {
+            const i = row + x;
+            const left = field[i - (x > 0 ? 1 : 0)];
+            const right = field[i + (x < width - 1 ? 1 : 0)];
+            const up = field[i - (y > 0 ? width : 0)];
+            const down = field[i + (y < height - 1 ? width : 0)];
+            const slopeX = right - left;
+            const slopeY = down - up;
+            const light = Math.max(-95, Math.min(95, slopeX * -2.2 + slopeY * -1.4));
+            const depth = Math.max(-45, Math.min(45, field[i] * 0.026));
+            const xEdgeFade = Math.min(x, width - 1 - x, 28) / 28;
+            const edgeFade = Math.min(xEdgeFade, yEdgeFade);
+            const shade = (light + depth) * edgeFade;
+
+            pixels[p++] = Math.max(0, Math.min(255, 13 + shade * 0.45));
+            pixels[p++] = Math.max(0, Math.min(255, 72 + shade * 0.9));
+            pixels[p++] = Math.max(0, Math.min(255, 111 + shade * 1.35));
+            pixels[p++] = 255;
+          }
+        }
+
+        const ctx = this.ctx;
+        ctx.putImageData(this.imageData, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(
+          this.canvas,
+          0,
+          0,
+          width,
+          height,
+          0,
+          0,
+          this.canvas.width,
+          this.canvas.height
+        );
+      }
+    }
+
+    class InputController {
+      constructor(canvas, simulation, getScale) {
+        this.canvas = canvas;
+        this.simulation = simulation;
+        this.getScale = getScale;
+        this.activePointers = new Map();
+        this.bindEvents();
+      }
+
+      bindEvents() {
+        this.canvas.addEventListener('pointerdown', (event) => {
+          this.canvas.setPointerCapture(event.pointerId);
+          this.activePointers.set(event.pointerId, this.toGridPoint(event));
+          this.inject(event, 1.2);
+        });
+
+        this.canvas.addEventListener('pointermove', (event) => {
+          if (!this.activePointers.has(event.pointerId)) return;
+          const point = this.toGridPoint(event);
+          const previous = this.activePointers.get(event.pointerId);
+          const dx = point.x - previous.x;
+          const dy = point.y - previous.y;
+          const distance = Math.hypot(dx, dy);
+          const steps = Math.max(1, Math.ceil(distance / 5));
+
+          for (let i = 1; i <= steps; i++) {
+            const t = i / steps;
+            this.simulation.disturb(previous.x + dx * t, previous.y + dy * t, 520, 5);
+          }
+
+          this.activePointers.set(event.pointerId, point);
+        });
+
+        const endPointer = (event) => {
+          this.activePointers.delete(event.pointerId);
+        };
+
+        this.canvas.addEventListener('pointerup', endPointer);
+        this.canvas.addEventListener('pointercancel', endPointer);
+        this.canvas.addEventListener('lostpointercapture', endPointer);
+      }
+
+      inject(event, multiplier) {
+        const point = this.toGridPoint(event);
+        this.simulation.disturb(point.x, point.y, this.simulation.impulseStrength * multiplier, this.simulation.impulseRadius);
+      }
+
+      toGridPoint(event) {
+        const rect = this.canvas.getBoundingClientRect();
+        const scale = this.getScale();
+
+        return {
+          x: (event.clientX - rect.left) * scale.x,
+          y: (event.clientY - rect.top) * scale.y
+        };
+      }
+    }
+
+    const canvas = document.getElementById('rippleCanvas');
+    const gridSize = 500;
+    const simulation = new WaveSimulation(gridSize, gridSize);
+    const renderer = new RippleRenderer(canvas, simulation);
+
+    new InputController(canvas, simulation, () => ({
+      x: simulation.width / renderer.displayWidth,
+      y: simulation.height / renderer.displayHeight
+    }));
+
+    function seedWater() {
+      const count = 8;
+
+      for (let i = 0; i < count; i++) {
+        simulation.disturb(
+          simulation.width * (0.18 + Math.random() * 0.64),
+          simulation.height * (0.18 + Math.random() * 0.64),
+          360 + Math.random() * 420,
+          5 + Math.random() * 7
+        );
+      }
+    }
+
+    function resize() {
+      renderer.resize();
+    }
+
+    let resizeFrame = 0;
+    window.addEventListener('resize', () => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(resize);
+    });
+
+    function animate() {
+      simulation.step();
+      renderer.draw();
+      requestAnimationFrame(animate);
+    }
+
+    seedWater();
+    animate();
+  </script>
+</body>
+</html>
